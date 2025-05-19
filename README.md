@@ -1,112 +1,209 @@
-# ASR API with Local Model Support
+# ASR (Automatic Speech Recognition) API
 
-This is a FastAPI-based Automatic Speech Recognition (ASR) API that supports local Whisper models. It's designed to be easily adaptable for different languages and model configurations.
+This API provides automatic speech recognition capabilities using the Whisper model, with additional features like noise reduction and audio format conversion.
 
 ## Features
 
-- FastAPI backend with automatic API documentation
-- Support for local Whisper models
-- Audio file conversion and preprocessing
+- Audio transcription using Whisper model
+- Noise reduction processing
+- Support for various audio formats (automatically converts to WAV)
 - CORS enabled for cross-origin requests
-- Simple and clean API interface
+- GPU acceleration support (if available)
 
-## Prerequisites
+## Dependencies
 
-- Python 3.9 or higher
-- FFmpeg installed on your system
-- A local Whisper model (compatible with Hugging Face transformers)
-
-## Installation
-
-1. Clone the repository:
 ```bash
-git clone <your-repo-url>
-cd <your-repo-directory>
+pip install fastapi
+pip install uvicorn
+pip install numpy
+pip install torch
+pip install transformers
+pip install pydub
+pip install noisereduce
+pip install soundfile
 ```
 
-2. Create and activate a virtual environment:
-```bash
-python -m venv venv
-# On Windows
-venv\Scripts\activate
-# On Unix or MacOS
-source venv/bin/activate
-```
+## Code Structure
 
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+### Imports and Setup
 
-## Setting Up Your Local Model
-
-1. Place your local model in a directory named after your model (e.g., `whisper-small_Akan_non_standardspeech/`)
-2. Ensure your model directory contains all necessary files:
-   - config.json
-   - model.safetensors (or model.bin)
-   - tokenizer.json
-   - preprocessor_config.json
-   - special_tokens_map.json
-
-3. Update the `MODEL_PATH` in `main.py` to point to your model:
 ```python
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "your_model_directory")
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+import numpy as np
+import os
+from typing import Optional
+import torch
+from transformers import pipeline
+from pathlib import Path
+from pydub import AudioSegment
+import tempfile
+import noisereduce as nr
 ```
 
-## Running the API
+- `FastAPI`: Web framework for building APIs
+- `CORSMiddleware`: Enables Cross-Origin Resource Sharing
+- `numpy`: For numerical operations on audio data
+- `torch`: For GPU acceleration
+- `transformers`: For the Whisper ASR model
+- `pydub`: For audio file conversion
+- `noisereduce`: For noise reduction processing
+
+### API Configuration
+
+```python
+app = FastAPI(title="ASR API", description="API for Automatic Speech Recognition")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+- Creates FastAPI application
+- Configures CORS to allow requests from any origin
+
+### Model Initialization
+
+```python
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "whisper-small_Akan_non_standardspeech")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+asr_pipe = pipeline(
+    "automatic-speech-recognition",
+    model=MODEL_PATH,
+    device=device
+)
+```
+
+- Loads the Whisper model from local path
+- Uses GPU if available, falls back to CPU
+- Initializes the ASR pipeline
+
+### Audio Conversion Function
+
+```python
+def convert_to_wav(audio_file_path: str) -> str:
+    """Convert any audio file to WAV format with 16kHz sample rate."""
+    temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+    temp_wav.close()
+    
+    audio = AudioSegment.from_file(audio_file_path)
+    audio = audio.set_frame_rate(16000).set_channels(1)
+    audio.export(temp_wav.name, format="wav")
+    
+    return temp_wav.name
+```
+
+- Converts any audio format to WAV
+- Sets sample rate to 16kHz
+- Converts to mono channel
+- Returns path to temporary WAV file
+
+### Transcription Function
+
+```python
+def transcribe_audio(audio_path: str) -> str:
+    """Transcribe audio using the Hugging Face pipeline."""
+    import soundfile as sf
+    audio_np, sample_rate = sf.read(audio_path)
+    
+    # Normalize audio
+    if audio_np.dtype != np.float32:
+        audio_np = audio_np.astype(np.float32)
+    if np.max(np.abs(audio_np)) > 1.0:
+        audio_np = audio_np / 32768.0
+    
+    # Noise reduction
+    audio_np = nr.reduce_noise(
+        y=audio_np,
+        sr=sample_rate,
+        prop_decrease=0.7,  # Amount of noise to reduce (0-1)
+        n_fft=2048,
+        win_length=2048,
+        hop_length=512,
+        time_constant_s=2.0,
+        freq_mask_smooth_hz=500,
+        time_mask_smooth_ms=50
+    )
+    
+    # Prepare and process audio
+    audio_input = {
+        "raw": audio_np,
+        "sampling_rate": 16000
+    }
+    
+    result = asr_pipe(audio_input, generate_kwargs={"language": "yo"})
+    return result["text"]
+```
+
+- Reads audio file using soundfile
+- Normalizes audio to float32 format
+- Applies noise reduction with the following parameters:
+  - `prop_decrease=0.7`: Reduces 70% of the noise
+  - `n_fft=2048`: FFT window size for spectral analysis
+  - `win_length=2048`: Window length for STFT
+  - `hop_length=512`: Samples between windows
+  - `time_constant_s=2.0`: Time constant for noise estimation
+  - `freq_mask_smooth_hz=500`: Frequency smoothing
+  - `time_mask_smooth_ms=50`: Time smoothing
+- Processes audio through ASR pipeline
+- Returns transcribed text
+
+### API Endpoints
+
+#### Root Endpoint
+```python
+@app.get("/")
+async def root():
+    return {"message": "Welcome to ASR API"}
+```
+- Simple welcome message
+
+#### Transcription Endpoint
+```python
+@app.post("/transcribe")
+async def transcribe_audio_endpoint(audio: UploadFile = File(...))
+```
+- Accepts audio file upload
+- Converts to WAV format
+- Applies noise reduction
+- Returns transcription
+
+### Server Configuration
+
+```python
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+```
+
+- Runs the API server on localhost:8000
+
+## Usage
 
 1. Start the server:
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python main.py
 ```
 
-2. Access the API documentation at:
-```
-http://localhost:8000/docs
-```
-
-## API Endpoints
-
-### POST /transcribe
-Transcribes audio files to text.
-
-**Request:**
-- Method: POST
-- Content-Type: multipart/form-data
-- Body: 
-  - audio: Audio file (supported formats: wav, mp3, m4a, etc.)
-
-**Response:**
-```json
-{
-    "text": "transcribed text"
-}
-```
-
-## Using with Mobile Apps
-
-To use this API with a mobile app:
-
-1. Make sure your computer and mobile device are on the same network
-2. Find your computer's local IP address:
-   - Windows: `ipconfig`
-   - Mac/Linux: `ifconfig` or `ip addr`
-3. Use the IP address in your API calls:
-```javascript
-const API_URL = 'http://YOUR_LOCAL_IP:8000/transcribe';
-```
+2. Send a POST request to `http://127.0.0.1:8000/transcribe` with an audio file
+3. Receive the transcription in the response
 
 ## Error Handling
 
-The API returns appropriate error messages in case of:
-- Invalid audio files
-- Model loading issues
-- Processing errors
+The API includes error handling for:
+- File upload issues
+- Audio conversion problems
+- Transcription errors
+- Temporary file cleanup
 
-## Contributing
+## Notes
 
-Feel free to submit issues and enhancement requests!
-
-## License
-
-[Your chosen license] 
+- The API uses temporary files for processing
+- All temporary files are automatically cleaned up
+- The model is configured for Yoruba language ("yo")
+- GPU acceleration is automatically enabled if available 
