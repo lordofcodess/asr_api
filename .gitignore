@@ -1,3 +1,16 @@
+# Model directories
+faster_whisper_akan/
+models/
+whisper-small_Akan_non_standardspeech/
+*.pt
+*.pth
+*.bin
+*.onnx
+*.h5
+*.hdf5
+*.ckpt
+*.safetensors
+
 # Python
 __pycache__/
 *.py[cod]
@@ -22,9 +35,8 @@ wheels/
 
 # Virtual Environment
 venv/
-ENV/
 env/
-.env
+ENV/
 
 # IDE
 .idea/
@@ -32,29 +44,44 @@ env/
 *.swp
 *.swo
 
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Audio files
+*.wav
+*.mp3
+*.ogg
+*.flac
+*.m4a
+
+# Local configuration
+.env
+.env.local
+config.local.yaml
+
 # Docker
 Dockerfile
 docker-compose.yml
 .docker/
 
-# Model files and large data
-*.safetensors
-*.bin
-*.pt
-*.pth
-*.onnx
-models/
-
 # Logs and databases
-*.log
 *.sqlite
 *.db
 
 # OS generated files
-.DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
-ehthumbs.db
-Thumbs.db 
+ehthumbs.db 

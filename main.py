@@ -1,16 +1,53 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import numpy as np
 import os
 from typing import Optional
 import torch
-from transformers import pipeline
+from transformers import pipeline, AutoProcessor, AutoModel
 from pathlib import Path
 from pydub import AudioSegment
 import tempfile
 import noisereduce as nr
+import soundfile as sf
+import io
+import base64
+import requests
+from faster_whisper import WhisperModel
+from TTS.api import TTS
+import asyncio
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="ASR API", description="API for Automatic Speech Recognition")
+# Initialize global variables
+tts_model = None
+device = "cuda" if torch.cuda.is_available() else "cpu"
+TTS_MODEL_NAME = "tts_models/tw_asante/openbible/vits"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    global tts_model
+    try:
+        print(f"Loading TTS model on {device}...")
+        tts_model = TTS(model_name=TTS_MODEL_NAME, progress_bar=False).to(device)
+        print("TTS Model loaded successfully!")
+    except Exception as e:
+        print(f"TTS Model loading failed: {str(e)}")
+        tts_model = None
+    
+    yield
+    
+    # Shutdown
+    if tts_model is not None:
+        del tts_model
+        torch.cuda.empty_cache()
+
+app = FastAPI(
+    title="Speech API",
+    description="API for Automatic Speech Recognition and Text-to-Speech",
+    lifespan=lifespan
+)
 
 # Add CORS middleware
 app.add_middleware(
@@ -22,15 +59,10 @@ app.add_middleware(
 )
 
 # Initialize ASR model
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "whisper-small_Akan_non_standardspeech")
-device = "cuda" if torch.cuda.is_available() else "cpu"
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "faster_whisper_akan")
 
-# Load ASR pipeline at startup
-asr_pipe = pipeline(
-    "automatic-speech-recognition",
-    model=MODEL_PATH,
-    device=device
-)
+# Load ASR model at startup
+asr_model = WhisperModel(MODEL_PATH, device=device, compute_type="float16" if device == "cuda" else "float32")
 
 def convert_to_wav(audio_file_path: str) -> str:
     """Convert any audio file to WAV format with 16kHz sample rate."""
@@ -46,9 +78,8 @@ def convert_to_wav(audio_file_path: str) -> str:
     return temp_wav.name
 
 def transcribe_audio(audio_path: str) -> str:
-    """Transcribe audio using the Hugging Face pipeline."""
+    """Transcribe audio using Faster Whisper."""
     # Read the WAV file
-    import soundfile as sf
     audio_np, sample_rate = sf.read(audio_path)
     
     # Ensure audio is float32 and normalized
@@ -70,19 +101,22 @@ def transcribe_audio(audio_path: str) -> str:
         time_mask_smooth_ms=50
     )
     
-    # Prepare audio input
-    audio_input = {
-        "raw": audio_np,
-        "sampling_rate": 16000
-    }
+    # Run inference with Faster Whisper
+    segments, _ = asr_model.transcribe(
+        audio_np,
+        language="yo",  # Akan language code
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500)
+    )
     
-    # Run inference
-    result = asr_pipe(audio_input, generate_kwargs={"language": "yo"})
-    return result["text"]
+    # Combine all segments into a single text
+    transcription = " ".join([segment.text for segment in segments])
+    return transcription
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to ASR API"}
+    return {"message": "Welcome to Speech API"}
 
 @app.post("/transcribe")
 async def transcribe_audio_endpoint(
@@ -118,6 +152,101 @@ async def transcribe_audio_endpoint(
         return {
             "error": str(e)
         }
+
+@app.get("/synthesize")
+async def synthesize_speech_get(text: str, speaker_id: Optional[str] = None):
+    """
+    Convert text to speech using TTS model (GET method)
+    """
+    if not tts_model:
+        raise HTTPException(
+            status_code=503,
+            detail="TTS model is not loaded. Please try again in a few moments."
+        )
+    
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    
+    try:
+        # Create in-memory audio buffer
+        audio_buffer = io.BytesIO()
+        
+        # Generate speech
+        kwargs = {}
+        if speaker_id:
+            kwargs["speaker"] = speaker_id
+            
+        tts_model.tts_to_file(
+            text=text,
+            file_path=audio_buffer,
+            **kwargs
+        )
+        
+        # Return as streaming response
+        audio_buffer.seek(0)
+        return StreamingResponse(
+            audio_buffer,
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": "attachment; filename=speech.wav",
+                "Generated-Text": text[:100]  # Return first 100 chars for reference
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+
+@app.post("/synthesize")
+async def synthesize_speech_post(text: str, speaker_id: Optional[str] = None):
+    """
+    Convert text to speech using TTS model (POST method)
+    """
+    if not tts_model:
+        raise HTTPException(
+            status_code=503,
+            detail="TTS model is not loaded. Please try again in a few moments."
+        )
+    
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    
+    try:
+        # Create in-memory audio buffer
+        audio_buffer = io.BytesIO()
+        
+        # Generate speech
+        kwargs = {}
+        if speaker_id:
+            kwargs["speaker"] = speaker_id
+            
+        tts_model.tts_to_file(
+            text=text,
+            file_path=audio_buffer,
+            **kwargs
+        )
+        
+        # Return as streaming response
+        audio_buffer.seek(0)
+        return StreamingResponse(
+            audio_buffer,
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": "attachment; filename=speech.wav",
+                "Generated-Text": text[:100]  # Return first 100 chars for reference
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "ready" if tts_model else "loading",
+        "device": device,
+        "asr_model": "faster_whisper_akan",
+        "tts_model": TTS_MODEL_NAME
+    }
 
 if __name__ == "__main__":
     import uvicorn
