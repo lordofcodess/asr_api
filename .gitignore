@@ -1,5 +1,4 @@
 # Model directories
-faster_whisper_akan/
 models/
 whisper-small_Akan_non_standardspeech/
 *.pt
