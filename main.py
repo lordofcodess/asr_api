@@ -1,6 +1,7 @@
-from fastapi import FastAPI, UploadFile, File, Response, HTTPException
+from fastapi import FastAPI, UploadFile, File, Response, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 import numpy as np
 import os
 from typing import Optional
@@ -153,53 +154,21 @@ async def transcribe_audio_endpoint(
             "error": str(e)
         }
 
-@app.get("/synthesize")
-async def synthesize_speech_get(text: str, speaker_id: Optional[str] = None):
-    """
-    Convert text to speech using TTS model (GET method)
-    """
-    if not tts_model:
-        raise HTTPException(
-            status_code=503,
-            detail="TTS model is not loaded. Please try again in a few moments."
-        )
-    
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="Text cannot be empty")
-    
-    try:
-        # Create in-memory audio buffer
-        audio_buffer = io.BytesIO()
-        
-        # Generate speech
-        kwargs = {}
-        if speaker_id:
-            kwargs["speaker"] = speaker_id
-            
-        tts_model.tts_to_file(
-            text=text,
-            file_path=audio_buffer,
-            **kwargs
-        )
-        
-        # Return as streaming response
-        audio_buffer.seek(0)
-        return StreamingResponse(
-            audio_buffer,
-            media_type="audio/wav",
-            headers={
-                "Content-Disposition": "attachment; filename=speech.wav",
-                "Generated-Text": text[:100]  # Return first 100 chars for reference
-            }
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+class TTSRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=500, description="Text to synthesize")
+    speaker_id: Optional[str] = Field(None, description="Optional speaker ID for multi-speaker models")
+    language: Optional[str] = Field("tw", description="Language code (default: tw for Asante)")
 
 @app.post("/synthesize")
-async def synthesize_speech_post(text: str, speaker_id: Optional[str] = None):
+async def synthesize_speech_post(request: TTSRequest):
     """
     Convert text to speech using TTS model (POST method)
+    
+    Args:
+        request: TTSRequest object containing:
+            - text: Text to synthesize (required)
+            - speaker_id: Optional speaker ID
+            - language: Optional language code (default: tw)
     """
     if not tts_model:
         raise HTTPException(
@@ -207,15 +176,69 @@ async def synthesize_speech_post(text: str, speaker_id: Optional[str] = None):
             detail="TTS model is not loaded. Please try again in a few moments."
         )
     
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    try:
+        # Create in-memory audio buffer
+        audio_buffer = io.BytesIO()
+        
+        # Generate speech
+        kwargs = {
+            "language": request.language
+        }
+        if request.speaker_id:
+            kwargs["speaker"] = request.speaker_id
+            
+        tts_model.tts_to_file(
+            text=request.text,
+            file_path=audio_buffer,
+            **kwargs
+        )
+        
+        # Return as streaming response
+        audio_buffer.seek(0)
+        return StreamingResponse(
+            audio_buffer,
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": "attachment; filename=speech.wav",
+                "Generated-Text": request.text[:100],  # Return first 100 chars for reference
+                "Content-Type": "audio/wav"
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Synthesis failed: {str(e)}"
+        )
+
+@app.get("/synthesize")
+async def synthesize_speech_get(
+    text: str = Field(..., min_length=1, max_length=500),
+    speaker_id: Optional[str] = None,
+    language: Optional[str] = "tw"
+):
+    """
+    Convert text to speech using TTS model (GET method)
+    
+    Args:
+        text: Text to synthesize (required)
+        speaker_id: Optional speaker ID
+        language: Optional language code (default: tw)
+    """
+    if not tts_model:
+        raise HTTPException(
+            status_code=503,
+            detail="TTS model is not loaded. Please try again in a few moments."
+        )
     
     try:
         # Create in-memory audio buffer
         audio_buffer = io.BytesIO()
         
         # Generate speech
-        kwargs = {}
+        kwargs = {
+            "language": language
+        }
         if speaker_id:
             kwargs["speaker"] = speaker_id
             
@@ -232,12 +255,16 @@ async def synthesize_speech_post(text: str, speaker_id: Optional[str] = None):
             media_type="audio/wav",
             headers={
                 "Content-Disposition": "attachment; filename=speech.wav",
-                "Generated-Text": text[:100]  # Return first 100 chars for reference
+                "Generated-Text": text[:100],  # Return first 100 chars for reference
+                "Content-Type": "audio/wav"
             }
         )
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Synthesis failed: {str(e)}"
+        )
 
 @app.get("/health")
 async def health_check():
